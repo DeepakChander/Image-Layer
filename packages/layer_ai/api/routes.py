@@ -1,3 +1,4 @@
+import logging
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
@@ -5,6 +6,8 @@ from fastapi.responses import FileResponse
 
 from layer_ai.errors import InvalidImageError
 from layer_ai.renderers import RendererNotImplementedError, get_renderer_adapter
+
+logger = logging.getLogger(__name__)
 
 ALLOWED_IMAGE_MEDIA_TYPES = {
     "image/png",
@@ -39,7 +42,13 @@ def register_routes(app: FastAPI) -> None:
         except InvalidImageError as error:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid image file",
+                detail=str(error),
+            ) from error
+        except Exception as error:  # pragma: no cover - exercised in integration tests
+            logger.exception("Job processing failed")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Job processing failed",
             ) from error
         return {
             "job_id": job_record.job_id,

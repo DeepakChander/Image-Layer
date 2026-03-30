@@ -37,6 +37,11 @@ class StubTextExtractor:
         return self._candidates
 
 
+class ExplodingTextExtractor:
+    def extract(self, image_path, image):  # noqa: ANN001
+        raise RuntimeError("OCR backend crashed")
+
+
 def test_create_job_generates_manifest_and_package(tmp_path):
     settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
     client = TestClient(create_app(settings))
@@ -133,6 +138,39 @@ def test_create_job_rejects_invalid_image_bytes(tmp_path):
     assert response.json()["detail"] == "Invalid image file"
 
 
+def test_create_job_rejects_empty_image_payload(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("empty.png", b"", "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Image file is empty"
+
+
+def test_create_job_marks_job_as_failed_when_text_extractor_crashes(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts")
+    client = TestClient(
+        create_app(settings, text_extractor=ExplodingTextExtractor()),
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("sample.png", _sample_png_bytes(), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    assert response.status_code == 500
+    job_record = client.app.state.job_service.get_job("job_000001")
+    assert job_record is not None
+    assert job_record.status == "failed_processing_error"
+
+
 def test_create_job_exports_raster_text_layers_when_ocr_finds_text(tmp_path):
     settings = Settings(storage_root=tmp_path / "artifacts")
     text_extractor = StubTextExtractor(
@@ -227,3 +265,65 @@ def test_create_job_scene_graph_matches_detected_layers(tmp_path):
     scene_root = next(node for node in scene_graph["nodes"] if node["id"] == "scene_root")
     assert "layer_001_background" in scene_root["children"]
     assert "layer_002_text_001" in scene_root["children"]
+
+
+def test_create_job_background_layer_removes_detected_text_region(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts")
+    text_extractor = StubTextExtractor(
+        [
+            TextCandidate(
+                text="HELLO",
+                confidence=0.95,
+                bbox={"x": 24, "y": 36, "width": 40, "height": 10},
+                polygon=[(24, 36), (64, 36), (64, 46), (24, 46)],
+            )
+        ]
+    )
+    client = TestClient(create_app(settings, text_extractor=text_extractor))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("text.png", _text_png_bytes(), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    assets_response = client.get(f"/v1/jobs/{response.json()['job_id']}/assets")
+    with ZipFile(BytesIO(assets_response.content)) as archive:
+        original = Image.open(BytesIO(archive.read("input/original.png"))).convert("RGBA")
+        background = Image.open(BytesIO(archive.read("layers/full_canvas/layer_001_background.png"))).convert(
+            "RGBA"
+        )
+
+    original_crop = original.crop((24, 36, 64, 46))
+    background_crop = background.crop((24, 36, 64, 46))
+    assert original_crop.tobytes() != background_crop.tobytes()
+
+
+def test_create_job_downgrades_status_and_confidence_for_low_confidence_text(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts")
+    text_extractor = StubTextExtractor(
+        [
+            TextCandidate(
+                text="HELLO",
+                confidence=0.55,
+                bbox={"x": 24, "y": 36, "width": 40, "height": 10},
+                polygon=[(24, 36), (64, 36), (64, 46), (24, 46)],
+            )
+        ]
+    )
+    client = TestClient(create_app(settings, text_extractor=text_extractor))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("text.png", _text_png_bytes(), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["status"] == "completed_low_confidence"
+    assert response.json()["global_confidence"] == 0.55
+
+    manifest = client.get(f"/v1/jobs/{response.json()['job_id']}/manifest").json()
+    assert manifest["status"] == "completed_low_confidence"
+    assert manifest["global_confidence"] == 0.55
+    assert "low_text_confidence" in manifest["warnings"]

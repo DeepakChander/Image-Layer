@@ -13,6 +13,9 @@ from layer_ai.text.models import TextCandidate
 
 
 class LocalArtifactStore:
+    HIGH_CONFIDENCE_THRESHOLD = 0.9
+    LOW_CONFIDENCE_THRESHOLD = 0.6
+
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -59,7 +62,7 @@ class LocalArtifactStore:
         filename: str,
         text_extractor: TextExtractor,
         editable_text_confidence_threshold: float,
-    ) -> tuple[Path, Path]:
+    ) -> tuple[SceneManifest, Path, Path]:
         job_root = self.job_root(job_id)
         input_dir = job_root / "input"
         cropped_dir = job_root / "layers" / "cropped"
@@ -83,7 +86,7 @@ class LocalArtifactStore:
         try:
             image = Image.open(BytesIO(image_bytes)).convert("RGBA")
         except UnidentifiedImageError as error:
-            raise InvalidImageError("Uploaded bytes are not a valid image") from error
+            raise InvalidImageError("Invalid image file") from error
         safe_name = Path(filename).stem or "input"
 
         original_path = input_dir / "original.png"
@@ -92,6 +95,8 @@ class LocalArtifactStore:
         image.save(normalized_path)
 
         width, height = image.size
+        background_image = image.copy()
+        reconstructed_image = background_image.copy()
         reconstructed_path = preview_dir / "reconstructed.png"
         overlay_path = preview_dir / "overlay_debug.png"
 
@@ -101,9 +106,6 @@ class LocalArtifactStore:
         cropped_path = cropped_dir / f"{layer_name}.png"
         full_canvas_path = full_canvas_dir / f"{layer_name}.png"
         mask_path = masks_dir / f"{layer_name}_mask.png"
-        image.save(cropped_path)
-        image.save(full_canvas_path)
-        Image.new("L", image.size, color=255).save(mask_path)
         layers.append(
             {
                 "id": layer_name,
@@ -141,6 +143,13 @@ class LocalArtifactStore:
             full_canvas_image.paste(rgba_crop, (bbox.x, bbox.y), rgba_crop)
             full_canvas_image.save(text_full_canvas_path)
             alpha_mask.save(text_mask_path)
+            background_patch = Image.new(
+                "RGBA",
+                rgba_crop.size,
+                color=(*self._estimate_background_color(rgba_crop), 255),
+            )
+            background_image.paste(background_patch, (bbox.x, bbox.y), alpha_mask)
+            reconstructed_image.paste(rgba_crop, (bbox.x, bbox.y), rgba_crop)
 
             editable_text = None
             if candidate.confidence >= editable_text_confidence_threshold:
@@ -154,6 +163,10 @@ class LocalArtifactStore:
                     confidence=candidate.confidence,
                 )
 
+            layer_warnings: list[str] = []
+            if candidate.confidence < self.HIGH_CONFIDENCE_THRESHOLD:
+                layer_warnings.append("low_text_confidence")
+
             layers.append(
                 {
                     "id": layer_name,
@@ -166,15 +179,21 @@ class LocalArtifactStore:
                     "full_canvas_asset": f"layers/full_canvas/{layer_name}.png",
                     "mask_asset": f"layers/masks/{layer_name}_mask.png",
                     "confidence": candidate.confidence,
-                    "warnings": [],
+                    "warnings": layer_warnings,
                     "text_content": candidate.text,
                     "text_confidence": candidate.confidence,
                     "editable_text": None if editable_text is None else editable_text.model_dump(mode="json"),
                 }
             )
 
-        image.save(reconstructed_path)
-        image.save(overlay_path)
+        background_image.save(cropped_path)
+        background_image.save(full_canvas_path)
+        Image.new("L", image.size, color=255).save(mask_path)
+        reconstructed_image.save(reconstructed_path)
+        self._build_overlay_debug(image, overlay_path, text_candidates)
+        global_confidence = self._compute_global_confidence(layers)
+        warnings = self._collect_manifest_warnings(layers)
+        status = self._determine_status(global_confidence, warnings)
 
         manifest = SceneManifest.model_validate(
             {
@@ -182,9 +201,9 @@ class LocalArtifactStore:
                 "schema_version": "1.0.0",
                 "job_id": job_id,
                 "route": "design_route",
-                "status": "completed_high_confidence",
-                "global_confidence": 1.0,
-                "warnings": [],
+                "status": status,
+                "global_confidence": global_confidence,
+                "warnings": warnings,
                 "canvas": {"width": width, "height": height},
                 "layers": layers,
             }
@@ -202,8 +221,9 @@ class LocalArtifactStore:
             json.dumps(
                 {
                     "job_id": job_id,
-                    "status": "completed_high_confidence",
+                    "status": status,
                     "route": "design_route",
+                    "warnings": warnings,
                 },
                 indent=2,
             ),
@@ -213,7 +233,7 @@ class LocalArtifactStore:
             json.dumps(
                 {
                     "job_id": job_id,
-                    "global_confidence": 1.0,
+                    "global_confidence": global_confidence,
                     "layers": [{"id": layer["id"], "confidence": layer["confidence"]} for layer in layers],
                 },
                 indent=2,
@@ -231,7 +251,7 @@ class LocalArtifactStore:
                     continue
                 archive.write(file_path, arcname=file_path.relative_to(job_root).as_posix())
 
-        return manifest_path, archive_path
+        return manifest, manifest_path, archive_path
 
     @staticmethod
     def _clamp_bbox(bbox: BoundingBox, image_size: tuple[int, int]) -> BoundingBox:
@@ -292,3 +312,42 @@ class LocalArtifactStore:
         green = int(sum(pixel[1] for pixel in visible_pixels) / len(visible_pixels))
         blue = int(sum(pixel[2] for pixel in visible_pixels) / len(visible_pixels))
         return f"#{red:02x}{green:02x}{blue:02x}"
+
+    @staticmethod
+    def _build_overlay_debug(image: Image.Image, overlay_path: Path, text_candidates: list[TextCandidate]) -> None:
+        from PIL import ImageDraw
+
+        overlay = image.copy()
+        draw = ImageDraw.Draw(overlay)
+        for candidate in text_candidates:
+            bbox = candidate.bbox
+            draw.rectangle(
+                (bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height),
+                outline=(255, 0, 0, 255),
+                width=1,
+            )
+        overlay.save(overlay_path)
+
+    @classmethod
+    def _compute_global_confidence(cls, layers: list[dict]) -> float:
+        non_background_layers = [layer for layer in layers if layer["type"] != "background"]
+        if not non_background_layers:
+            return 1.0
+        return min(float(layer["confidence"]) for layer in non_background_layers)
+
+    @staticmethod
+    def _collect_manifest_warnings(layers: list[dict]) -> list[str]:
+        warnings: list[str] = []
+        for layer in layers:
+            for warning in layer.get("warnings", []):
+                if warning not in warnings:
+                    warnings.append(warning)
+        return warnings
+
+    @classmethod
+    def _determine_status(cls, global_confidence: float, warnings: list[str]) -> str:
+        if global_confidence < cls.LOW_CONFIDENCE_THRESHOLD:
+            return "completed_low_confidence"
+        if warnings:
+            return "completed_with_warnings"
+        return "completed_high_confidence"

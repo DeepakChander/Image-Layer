@@ -8,6 +8,8 @@ class JobStatus(StrEnum):
     PREPROCESSING = "preprocessing"
     EXPORTING_ASSETS = "exporting_assets"
     COMPLETED_HIGH_CONFIDENCE = "completed_high_confidence"
+    COMPLETED_WITH_WARNINGS = "completed_with_warnings"
+    COMPLETED_LOW_CONFIDENCE = "completed_low_confidence"
     FAILED_PROCESSING_ERROR = "failed_processing_error"
 
 
