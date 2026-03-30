@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Layer AI Manifest",
+  "type": "object",
+  "required": [
+    "package_version",
+    "schema_version",
+    "job_id",
+    "route",
+    "status",
+    "global_confidence",
+    "warnings",
+    "canvas",
+    "layers"
+  ],
+  "properties": {
+    "package_version": { "type": "string" },
+    "schema_version": { "type": "string" },
+    "job_id": { "type": "string" },
+    "route": { "type": "string" },
+    "status": { "type": "string" },
+    "global_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "canvas": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "layers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "type",
+          "bbox",
+          "z_index",
+          "cropped_asset",
+          "full_canvas_asset",
+          "mask_asset",
+          "confidence",
+          "warnings",
+          "editable_text"
+        ],
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "type": { "type": "string" },
+          "bbox": {
+            "type": "object",
+            "required": ["x", "y", "width", "height"],
+            "properties": {
+              "x": { "type": "integer", "minimum": 0 },
+              "y": { "type": "integer", "minimum": 0 },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 }
+            },
+            "additionalProperties": false
+          },
+          "z_index": { "type": "integer" },
+          "parent_id": { "type": ["string", "null"] },
+          "cropped_asset": { "type": "string" },
+          "full_canvas_asset": { "type": "string" },
+          "mask_asset": { "type": "string" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "warnings": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "editable_text": {
+            "type": ["object", "null"],
+            "required": [
+              "text",
+              "font_family_guess",
+              "font_weight",
+              "font_size_px",
+              "fill",
+              "alignment",
+              "confidence"
+            ],
+            "properties": {
+              "text": { "type": "string" },
+              "font_family_guess": { "type": "string" },
+              "font_weight": { "type": "integer" },
+              "font_size_px": { "type": "integer", "minimum": 1 },
+              "fill": { "type": "string" },
+              "alignment": { "type": "string" },
+              "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}
