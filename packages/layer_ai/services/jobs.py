@@ -5,13 +5,20 @@ from layer_ai.contracts.models import JobRecord, JobStatus
 from layer_ai.errors import InvalidImageError
 from layer_ai.storage.local import LocalArtifactStore
 from layer_ai.text.base import TextExtractor
+from layer_ai.visual.base import VisualExtractor
 
 
 class JobService:
-    def __init__(self, settings: Settings, text_extractor: TextExtractor) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        text_extractor: TextExtractor,
+        visual_extractor: VisualExtractor,
+    ) -> None:
         self.settings = settings
         self.store = LocalArtifactStore(settings.storage_root)
         self.text_extractor = text_extractor
+        self.visual_extractor = visual_extractor
 
     async def create_job(self, image_bytes: bytes, filename: str, instruction: str) -> JobRecord:
         if not image_bytes:
@@ -38,6 +45,7 @@ class JobService:
                 image_bytes=image_bytes,
                 filename=filename,
                 text_extractor=self.text_extractor,
+                visual_extractor=self.visual_extractor,
                 editable_text_confidence_threshold=self.settings.editable_text_confidence_threshold,
             )
 

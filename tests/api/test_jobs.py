@@ -10,6 +10,7 @@ from layer_ai.api.app import create_app
 from layer_ai.config import Settings
 from layer_ai.contracts.registry import load_contract_schema
 from layer_ai.text.models import TextCandidate
+from layer_ai.visual.models import VisualCandidate
 
 
 def _sample_png_bytes() -> bytes:
@@ -29,6 +30,15 @@ def _text_png_bytes(text: str = "HELLO") -> bytes:
     return buffer.getvalue()
 
 
+def _visual_png_bytes() -> bytes:
+    image = Image.new("RGB", (240, 120), color=(255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rounded_rectangle((32, 28, 108, 72), fill=(27, 99, 198), radius=8)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
 class StubTextExtractor:
     def __init__(self, candidates: list[TextCandidate]) -> None:
         self._candidates = candidates
@@ -40,6 +50,14 @@ class StubTextExtractor:
 class ExplodingTextExtractor:
     def extract(self, image_path, image):  # noqa: ANN001
         raise RuntimeError("OCR backend crashed")
+
+
+class StubVisualExtractor:
+    def __init__(self, candidates: list[VisualCandidate]) -> None:
+        self._candidates = candidates
+
+    def extract(self, image, text_candidates):  # noqa: ANN001
+        return self._candidates
 
 
 def test_create_job_generates_manifest_and_package(tmp_path):
@@ -327,3 +345,38 @@ def test_create_job_downgrades_status_and_confidence_for_low_confidence_text(tmp
     assert manifest["status"] == "completed_low_confidence"
     assert manifest["global_confidence"] == 0.55
     assert "low_text_confidence" in manifest["warnings"]
+
+
+def test_create_job_exports_visual_layers_when_visual_extractor_finds_components(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts")
+    visual_extractor = StubVisualExtractor(
+        [
+            VisualCandidate(
+                label="cta_button",
+                layer_type="button",
+                confidence=0.84,
+                bbox={"x": 32, "y": 28, "width": 76, "height": 44},
+                mask=[[255] * 76 for _ in range(44)],
+            )
+        ]
+    )
+    client = TestClient(create_app(settings, text_extractor=StubTextExtractor([]), visual_extractor=visual_extractor))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("visual.png", _visual_png_bytes(), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    assert response.status_code == 201
+    manifest = client.get(f"/v1/jobs/{response.json()['job_id']}/manifest").json()
+    visual_layer = next(layer for layer in manifest["layers"] if layer["type"] == "button")
+    assert visual_layer["bbox"] == {"x": 32, "y": 28, "width": 76, "height": 44}
+    assert visual_layer["confidence"] == 0.84
+
+    assets_response = client.get(f"/v1/jobs/{response.json()['job_id']}/assets")
+    with ZipFile(BytesIO(assets_response.content)) as archive:
+        names = set(archive.namelist())
+    assert "layers/cropped/layer_002_button_001.png" in names
+    assert "layers/full_canvas/layer_002_button_001.png" in names
+    assert "layers/masks/layer_002_button_001_mask.png" in names

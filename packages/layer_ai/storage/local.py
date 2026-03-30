@@ -10,6 +10,8 @@ from layer_ai.contracts.models import BoundingBox, EditableText, JobRecord, Scen
 from layer_ai.errors import InvalidImageError
 from layer_ai.text.base import TextExtractor
 from layer_ai.text.models import TextCandidate
+from layer_ai.visual.base import VisualExtractor
+from layer_ai.visual.models import VisualCandidate
 
 
 class LocalArtifactStore:
@@ -61,6 +63,7 @@ class LocalArtifactStore:
         image_bytes: bytes,
         filename: str,
         text_extractor: TextExtractor,
+        visual_extractor: VisualExtractor,
         editable_text_confidence_threshold: float,
     ) -> tuple[SceneManifest, Path, Path]:
         job_root = self.job_root(job_id)
@@ -96,11 +99,11 @@ class LocalArtifactStore:
 
         width, height = image.size
         background_image = image.copy()
-        reconstructed_image = background_image.copy()
         reconstructed_path = preview_dir / "reconstructed.png"
         overlay_path = preview_dir / "overlay_debug.png"
 
         layers: list[dict] = []
+        composited_layers: list[Image.Image] = []
 
         layer_name = "layer_001_background"
         cropped_path = cropped_dir / f"{layer_name}.png"
@@ -143,13 +146,13 @@ class LocalArtifactStore:
             full_canvas_image.paste(rgba_crop, (bbox.x, bbox.y), rgba_crop)
             full_canvas_image.save(text_full_canvas_path)
             alpha_mask.save(text_mask_path)
+            composited_layers.append(full_canvas_image)
             background_patch = Image.new(
                 "RGBA",
                 rgba_crop.size,
                 color=(*self._estimate_background_color(rgba_crop), 255),
             )
             background_image.paste(background_patch, (bbox.x, bbox.y), alpha_mask)
-            reconstructed_image.paste(rgba_crop, (bbox.x, bbox.y), rgba_crop)
 
             editable_text = None
             if candidate.confidence >= editable_text_confidence_threshold:
@@ -186,11 +189,67 @@ class LocalArtifactStore:
                 }
             )
 
+        visual_candidates = visual_extractor.extract(background_image.copy(), text_candidates)
+        for index, candidate in enumerate(visual_candidates, start=1):
+            layer_index = len(layers) + 1
+            layer_name = f"layer_{layer_index:03d}_{candidate.layer_type}_{index:03d}"
+            bbox = self._clamp_bbox(candidate.bbox, image.size)
+            if bbox.width <= 0 or bbox.height <= 0:
+                continue
+
+            rgba_crop, alpha_mask = self._extract_visual_rgba(image, bbox, candidate)
+            if alpha_mask.getbbox() is None:
+                continue
+
+            visual_cropped_path = cropped_dir / f"{layer_name}.png"
+            visual_full_canvas_path = full_canvas_dir / f"{layer_name}.png"
+            visual_mask_path = masks_dir / f"{layer_name}_mask.png"
+            rgba_crop.save(visual_cropped_path)
+
+            full_canvas_image = Image.new("RGBA", image.size, color=(0, 0, 0, 0))
+            full_canvas_image.paste(rgba_crop, (bbox.x, bbox.y), rgba_crop)
+            full_canvas_image.save(visual_full_canvas_path)
+            alpha_mask.save(visual_mask_path)
+            composited_layers.append(full_canvas_image)
+
+            background_patch = Image.new(
+                "RGBA",
+                rgba_crop.size,
+                color=(*self._estimate_background_color(image.crop((bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height))), 255),
+            )
+            background_image.paste(background_patch, (bbox.x, bbox.y), alpha_mask)
+
+            layer_warnings = list(candidate.warnings)
+            if candidate.confidence < self.HIGH_CONFIDENCE_THRESHOLD and "low_visual_confidence" not in layer_warnings:
+                layer_warnings.append("low_visual_confidence")
+
+            layers.append(
+                {
+                    "id": layer_name,
+                    "name": candidate.label.replace("_", " "),
+                    "type": candidate.layer_type,
+                    "bbox": bbox.model_dump(mode="json"),
+                    "z_index": layer_index - 1,
+                    "parent_id": None,
+                    "cropped_asset": f"layers/cropped/{layer_name}.png",
+                    "full_canvas_asset": f"layers/full_canvas/{layer_name}.png",
+                    "mask_asset": f"layers/masks/{layer_name}_mask.png",
+                    "confidence": candidate.confidence,
+                    "warnings": layer_warnings,
+                    "text_content": None,
+                    "text_confidence": None,
+                    "editable_text": None,
+                }
+            )
+
         background_image.save(cropped_path)
         background_image.save(full_canvas_path)
         Image.new("L", image.size, color=255).save(mask_path)
+        reconstructed_image = background_image.copy()
+        for layer_image in composited_layers:
+            reconstructed_image.alpha_composite(layer_image)
         reconstructed_image.save(reconstructed_path)
-        self._build_overlay_debug(image, overlay_path, text_candidates)
+        self._build_overlay_debug(image, overlay_path, text_candidates, visual_candidates)
         global_confidence = self._compute_global_confidence(layers)
         warnings = self._collect_manifest_warnings(layers)
         status = self._determine_status(global_confidence, warnings)
@@ -279,6 +338,21 @@ class LocalArtifactStore:
         return rgba_crop, alpha_mask
 
     @staticmethod
+    def _extract_visual_rgba(
+        image: Image.Image,
+        bbox: BoundingBox,
+        candidate: VisualCandidate,
+    ) -> tuple[Image.Image, Image.Image]:
+        crop = image.crop((bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height)).convert("RGBA")
+        alpha_mask = Image.new("L", (bbox.width, bbox.height), color=0)
+        for y, row in enumerate(candidate.mask[: bbox.height]):
+            for x, value in enumerate(row[: bbox.width]):
+                alpha_mask.putpixel((x, y), int(value))
+        rgba_crop = crop.copy()
+        rgba_crop.putalpha(alpha_mask)
+        return rgba_crop, alpha_mask
+
+    @staticmethod
     def _estimate_background_color(crop: Image.Image) -> tuple[int, int, int]:
         rgb_crop = crop.convert("RGB")
         width, height = rgb_crop.size
@@ -314,7 +388,12 @@ class LocalArtifactStore:
         return f"#{red:02x}{green:02x}{blue:02x}"
 
     @staticmethod
-    def _build_overlay_debug(image: Image.Image, overlay_path: Path, text_candidates: list[TextCandidate]) -> None:
+    def _build_overlay_debug(
+        image: Image.Image,
+        overlay_path: Path,
+        text_candidates: list[TextCandidate],
+        visual_candidates: list[VisualCandidate],
+    ) -> None:
         from PIL import ImageDraw
 
         overlay = image.copy()
@@ -324,6 +403,13 @@ class LocalArtifactStore:
             draw.rectangle(
                 (bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height),
                 outline=(255, 0, 0, 255),
+                width=1,
+            )
+        for candidate in visual_candidates:
+            bbox = candidate.bbox
+            draw.rectangle(
+                (bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height),
+                outline=(0, 255, 0, 255),
                 width=1,
             )
         overlay.save(overlay_path)
