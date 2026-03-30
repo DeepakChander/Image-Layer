@@ -76,6 +76,8 @@
             "type": "array",
             "items": { "type": "string" }
           },
+          "text_content": { "type": ["string", "null"] },
+          "text_confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
           "editable_text": {
             "type": ["object", "null"],
             "required": [

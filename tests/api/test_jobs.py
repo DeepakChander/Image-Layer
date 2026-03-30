@@ -1,13 +1,15 @@
 from io import BytesIO
+import json
 from zipfile import ZipFile
 
 from fastapi.testclient import TestClient
 from jsonschema import Draft202012Validator
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 from layer_ai.api.app import create_app
 from layer_ai.config import Settings
 from layer_ai.contracts.registry import load_contract_schema
+from layer_ai.text.models import TextCandidate
 
 
 def _sample_png_bytes() -> bytes:
@@ -17,8 +19,26 @@ def _sample_png_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def _text_png_bytes(text: str = "HELLO") -> bytes:
+    image = Image.new("RGB", (240, 120), color=(255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    font = ImageFont.load_default()
+    draw.text((24, 36), text, fill=(0, 0, 0), font=font)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+class StubTextExtractor:
+    def __init__(self, candidates: list[TextCandidate]) -> None:
+        self._candidates = candidates
+
+    def extract(self, image_path, image):  # noqa: ANN001
+        return self._candidates
+
+
 def test_create_job_generates_manifest_and_package(tmp_path):
-    settings = Settings(storage_root=tmp_path / "artifacts")
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
     client = TestClient(create_app(settings))
 
     response = client.post(
@@ -65,7 +85,7 @@ def test_create_job_generates_manifest_and_package(tmp_path):
 
 
 def test_create_job_requires_instruction(tmp_path):
-    settings = Settings(storage_root=tmp_path / "artifacts")
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
     client = TestClient(create_app(settings))
 
     response = client.post(
@@ -77,7 +97,7 @@ def test_create_job_requires_instruction(tmp_path):
 
 
 def test_get_unknown_job_returns_404(tmp_path):
-    settings = Settings(storage_root=tmp_path / "artifacts")
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
     client = TestClient(create_app(settings))
 
     response = client.get("/v1/jobs/job_missing")
@@ -86,7 +106,7 @@ def test_get_unknown_job_returns_404(tmp_path):
 
 
 def test_create_job_rejects_unsupported_media_type(tmp_path):
-    settings = Settings(storage_root=tmp_path / "artifacts")
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
     client = TestClient(create_app(settings))
 
     response = client.post(
@@ -100,7 +120,7 @@ def test_create_job_rejects_unsupported_media_type(tmp_path):
 
 
 def test_create_job_rejects_invalid_image_bytes(tmp_path):
-    settings = Settings(storage_root=tmp_path / "artifacts")
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
     client = TestClient(create_app(settings))
 
     response = client.post(
@@ -111,3 +131,99 @@ def test_create_job_rejects_invalid_image_bytes(tmp_path):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid image file"
+
+
+def test_create_job_exports_raster_text_layers_when_ocr_finds_text(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts")
+    text_extractor = StubTextExtractor(
+        [
+            TextCandidate(
+                text="HELLO",
+                confidence=0.95,
+                bbox={"x": 24, "y": 36, "width": 40, "height": 10},
+                polygon=[(24, 36), (64, 36), (64, 46), (24, 46)],
+            )
+        ]
+    )
+    client = TestClient(create_app(settings, text_extractor=text_extractor))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("text.png", _text_png_bytes(), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    assert response.status_code == 201
+    manifest = client.get(f"/v1/jobs/{response.json()['job_id']}/manifest").json()
+    assert len(manifest["layers"]) == 2
+    text_layer = next(layer for layer in manifest["layers"] if layer["type"] == "text")
+    assert text_layer["text_content"] == "HELLO"
+    assert text_layer["text_confidence"] == 0.95
+    assert text_layer["editable_text"] is None
+
+    assets_response = client.get(f"/v1/jobs/{response.json()['job_id']}/assets")
+    with ZipFile(BytesIO(assets_response.content)) as archive:
+        names = set(archive.namelist())
+        assert "layers/cropped/layer_002_text_001.png" in names
+        assert "layers/full_canvas/layer_002_text_001.png" in names
+        assert "layers/masks/layer_002_text_001_mask.png" in names
+
+
+def test_create_job_emits_editable_text_when_confidence_is_high(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts")
+    text_extractor = StubTextExtractor(
+        [
+            TextCandidate(
+                text="PRICING",
+                confidence=0.995,
+                bbox={"x": 30, "y": 40, "width": 55, "height": 12},
+                polygon=[(30, 40), (85, 40), (85, 52), (30, 52)],
+            )
+        ]
+    )
+    client = TestClient(create_app(settings, text_extractor=text_extractor))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("text.png", _text_png_bytes("PRICING"), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    manifest = client.get(f"/v1/jobs/{response.json()['job_id']}/manifest").json()
+    text_layer = next(layer for layer in manifest["layers"] if layer["type"] == "text")
+    assert text_layer["editable_text"]["text"] == "PRICING"
+    assert text_layer["editable_text"]["confidence"] == 0.995
+
+
+def test_create_job_scene_graph_matches_detected_layers(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts")
+    text_extractor = StubTextExtractor(
+        [
+            TextCandidate(
+                text="CONTACT",
+                confidence=0.96,
+                bbox={"x": 40, "y": 42, "width": 60, "height": 12},
+                polygon=[(40, 42), (100, 42), (100, 54), (40, 54)],
+            )
+        ]
+    )
+    client = TestClient(create_app(settings, text_extractor=text_extractor))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("text.png", _text_png_bytes("CONTACT"), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    assets_response = client.get(f"/v1/jobs/{response.json()['job_id']}/assets")
+    with ZipFile(BytesIO(assets_response.content)) as archive:
+        scene_graph = json.loads(archive.read("manifest/scene_graph.json"))
+
+    node_ids = {node["id"] for node in scene_graph["nodes"]}
+    assert "scene_root" in node_ids
+    assert "layer_001_background" in node_ids
+    assert "layer_002_text_001" in node_ids
+
+    scene_root = next(node for node in scene_graph["nodes"] if node["id"] == "scene_root")
+    assert "layer_001_background" in scene_root["children"]
+    assert "layer_002_text_001" in scene_root["children"]

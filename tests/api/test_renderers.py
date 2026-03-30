@@ -15,7 +15,7 @@ def _sample_png_bytes() -> bytes:
 
 
 def test_renderer_handoff_returns_not_implemented_for_existing_job(tmp_path):
-    settings = Settings(storage_root=tmp_path / "artifacts")
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
     client = TestClient(create_app(settings))
     create_response = client.post(
         "/v1/jobs",
@@ -31,7 +31,7 @@ def test_renderer_handoff_returns_not_implemented_for_existing_job(tmp_path):
 
 
 def test_renderer_handoff_returns_404_for_unknown_job(tmp_path):
-    settings = Settings(storage_root=tmp_path / "artifacts")
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
     client = TestClient(create_app(settings))
 
     response = client.post("/v1/jobs/job_missing/render/remotion")

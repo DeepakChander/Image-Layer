@@ -3,11 +3,14 @@ from datetime import UTC, datetime
 from layer_ai.config import Settings
 from layer_ai.contracts.models import JobRecord, JobStatus
 from layer_ai.storage.local import LocalArtifactStore
+from layer_ai.text.base import TextExtractor
 
 
 class JobService:
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, text_extractor: TextExtractor) -> None:
+        self.settings = settings
         self.store = LocalArtifactStore(settings.storage_root)
+        self.text_extractor = text_extractor
 
     async def create_job(self, image_bytes: bytes, filename: str, instruction: str) -> JobRecord:
         if not image_bytes:
@@ -28,10 +31,12 @@ class JobService:
         record = record.model_copy(update={"status": JobStatus.PREPROCESSING})
         self.store.write_job_record(record)
 
-        manifest_path, asset_zip_path = self.store.build_stub_package(
+        manifest_path, asset_zip_path = self.store.build_package(
             job_id=job_id,
             image_bytes=image_bytes,
             filename=filename,
+            text_extractor=self.text_extractor,
+            editable_text_confidence_threshold=self.settings.editable_text_confidence_threshold,
         )
 
         record = record.model_copy(
@@ -56,4 +61,3 @@ class JobService:
         if record is None:
             return None
         return record.artifact_zip_path
-

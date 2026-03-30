@@ -40,6 +40,8 @@ class LayerEntry(BaseModel):
     mask_asset: str
     confidence: float = Field(ge=0.0, le=1.0)
     warnings: list[str] = Field(default_factory=list)
+    text_content: str | None = None
+    text_confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     editable_text: EditableText | None = None
 
 
@@ -68,4 +70,3 @@ class JobRecord(BaseModel):
     instruction: str
     created_at: str
     artifact_zip_path: str | None = None
-

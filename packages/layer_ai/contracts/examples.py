@@ -52,3 +52,28 @@ def build_example_scene_graph() -> dict:
         ],
     }
 
+
+def build_scene_graph(job_id: str, layers: list[dict]) -> dict:
+    return {
+        "job_id": job_id,
+        "root_id": "scene_root",
+        "nodes": [
+            {
+                "id": "scene_root",
+                "type": "group",
+                "name": "scene",
+                "children": [layer["id"] for layer in sorted(layers, key=lambda layer: layer["z_index"])],
+                "z_index": 0,
+            },
+            *[
+                {
+                    "id": layer["id"],
+                    "type": layer["type"],
+                    "name": layer["name"],
+                    "children": [],
+                    "z_index": layer["z_index"],
+                }
+                for layer in sorted(layers, key=lambda layer: layer["z_index"])
+            ],
+        ],
+    }

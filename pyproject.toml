@@ -14,6 +14,12 @@ dependencies = [
   "uvicorn>=0.34,<0.35",
 ]
 
+[project.optional-dependencies]
+ocr = [
+  "paddleocr>=3.4,<4.0",
+  "paddlepaddle>=3.3,<4.0",
+]
+
 [dependency-groups]
 dev = [
   "httpx>=0.28,<0.29",
@@ -30,4 +36,3 @@ packages = ["packages/layer_ai"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["packages"]
-
