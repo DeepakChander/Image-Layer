@@ -20,6 +20,8 @@
     "route": { "type": "string" },
     "status": { "type": "string" },
     "global_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "reconstruction_score": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+    "preview_diff_ratio": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
     "warnings": {
       "type": "array",
       "items": { "type": "string" }

@@ -59,6 +59,8 @@ class SceneManifest(BaseModel):
     route: str
     status: str
     global_confidence: float = Field(ge=0.0, le=1.0)
+    reconstruction_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    preview_diff_ratio: float | None = Field(default=None, ge=0.0, le=1.0)
     warnings: list[str] = Field(default_factory=list)
     canvas: Canvas
     layers: list[LayerEntry]

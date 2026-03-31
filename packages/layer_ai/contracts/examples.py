@@ -6,6 +6,8 @@ def build_example_manifest() -> dict:
         "route": "design_route",
         "status": "completed_high_confidence",
         "global_confidence": 1.0,
+        "reconstruction_score": 1.0,
+        "preview_diff_ratio": 0.0,
         "warnings": [],
         "canvas": {
             "width": 160,
