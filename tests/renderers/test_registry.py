@@ -1,5 +1,15 @@
-import pytest
+import json
+import subprocess
+import sys
+from io import BytesIO
+from pathlib import Path
 
+import pytest
+from fastapi.testclient import TestClient
+from PIL import Image
+
+from layer_ai.api.app import create_app
+from layer_ai.config import Settings
 from layer_ai.renderers.after_effects import AfterEffectsRendererAdapter
 from layer_ai.renderers.base import UnsupportedRendererError
 from layer_ai.renderers.models import RendererHandoff, RendererHandoffResult
@@ -84,3 +94,63 @@ def test_registry_returns_real_renderer_adapters():
 def test_registry_rejects_unknown_renderer_names():
     with pytest.raises(UnsupportedRendererError):
         get_renderer_adapter("not-a-renderer")
+
+
+def _sample_png_bytes() -> bytes:
+    image = Image.new("RGB", (120, 80), color=(10, 20, 30))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_renderer_cli_generates_handoff_for_existing_job(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
+    client = TestClient(create_app(settings))
+    create_response = client.post(
+        "/v1/jobs",
+        files={"image": ("sample.png", _sample_png_bytes(), "image/png")},
+        data={"instruction": "Extract and render"},
+    )
+    job_id = create_response.json()["job_id"]
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[2] / "apps" / "worker" / "run_renderer.py"),
+            "--job-id",
+            job_id,
+            "--renderer",
+            "after-effects",
+            "--storage-root",
+            str(settings.storage_root),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+
+    assert result.returncode == 0
+    assert payload["renderer"] == "after-effects"
+    assert payload["handoff_path"] == "renderers/after-effects/renderer_handoff.json"
+
+
+def test_renderer_cli_returns_non_zero_for_missing_job(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[2] / "apps" / "worker" / "run_renderer.py"),
+            "--job-id",
+            "job_missing",
+            "--renderer",
+            "after-effects",
+            "--storage-root",
+            str(settings.storage_root),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 1
+    assert "Job not found" in result.stderr
