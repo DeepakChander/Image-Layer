@@ -54,3 +54,38 @@ Current warning examples:
   - `uv run pytest tests/quality/test_evaluator.py -q`
 - Run the full suite: `uv run pytest -q`
 - Run compile verification: `uv run python -m compileall apps packages tests`
+
+## Phase 5 Renderer Handoff
+
+Completed jobs can now generate a local renderer handoff payload for downstream motion tools.
+
+API endpoints:
+
+- `POST /v1/jobs/{job_id}/render/after-effects`
+- `POST /v1/jobs/{job_id}/render/remotion`
+- `POST /v1/jobs/{job_id}/render/{renderer_name}`
+
+Renderer output paths:
+
+- `renderers/after-effects/renderer_handoff.json`
+- `renderers/remotion/renderer_handoff.json`
+
+Each handoff payload includes:
+
+- job metadata
+- ordered layer references
+- resolved asset paths
+- warnings and confidence
+- background and text metadata
+
+CLI usage:
+
+```bash
+uv run python apps/worker/run_renderer.py --job-id job_000001 --renderer after-effects --storage-root artifacts
+```
+
+Phase 5 test commands:
+
+- `uv run pytest tests/api/test_renderers.py -q`
+- `uv run pytest tests/renderers/test_after_effects.py -q`
+- `uv run pytest tests/renderers/test_registry.py -q`
