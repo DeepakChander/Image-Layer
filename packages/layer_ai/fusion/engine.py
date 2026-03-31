@@ -17,13 +17,13 @@ class FusionEngine:
         ]
         layers = sorted(
             [*filtered_visuals, *text_layers],
-            key=lambda layer: (layer["z_index"], layer["id"]),
+            key=lambda layer: (layer["z_index"], self._stable_key(layer)),
         )
         return FusionResult(layers=layers, warnings=warnings)
 
     def _remove_visual_duplicates(self, visual_layers: list[dict], warnings: list[str]) -> list[dict]:
         survivors: list[dict] = []
-        for layer in sorted(visual_layers, key=lambda item: (-item["confidence"], item["id"])):
+        for layer in sorted(visual_layers, key=lambda item: (-item["confidence"], self._stable_key(item))):
             duplicate_index = next(
                 (
                     index
@@ -39,6 +39,10 @@ class FusionEngine:
                 continue
             survivors.append(layer)
         return survivors
+
+    @staticmethod
+    def _stable_key(layer: dict) -> str:
+        return str(layer.get("id") or layer.get("name") or layer.get("type") or "")
 
     @staticmethod
     def _iou(first: dict, second: dict) -> float:

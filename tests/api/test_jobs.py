@@ -380,3 +380,88 @@ def test_create_job_exports_visual_layers_when_visual_extractor_finds_components
     assert "layers/cropped/layer_002_button_001.png" in names
     assert "layers/full_canvas/layer_002_button_001.png" in names
     assert "layers/masks/layer_002_button_001_mask.png" in names
+
+
+def test_create_job_exposes_reconstruction_metrics_in_manifest_and_logs(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts", ocr_backend="disabled")
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("sample.png", _sample_png_bytes(), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    manifest = client.get(f"/v1/jobs/{response.json()['job_id']}/manifest").json()
+    assert manifest["reconstruction_score"] == 1.0
+    assert manifest["preview_diff_ratio"] == 0.0
+
+    assets_response = client.get(f"/v1/jobs/{response.json()['job_id']}/assets")
+    with ZipFile(BytesIO(assets_response.content)) as archive:
+        confidence_report = json.loads(archive.read("logs/confidence_report.json"))
+
+    assert confidence_report["reconstruction_score"] == 1.0
+    assert confidence_report["preview_diff_ratio"] == 0.0
+
+
+def test_create_job_fuses_duplicate_visual_layers_and_warns(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts")
+    visual_extractor = StubVisualExtractor(
+        [
+            VisualCandidate(
+                label="cta_button",
+                layer_type="button",
+                confidence=0.84,
+                bbox={"x": 32, "y": 28, "width": 76, "height": 44},
+                mask=[[255] * 76 for _ in range(44)],
+            ),
+            VisualCandidate(
+                label="cta_button_duplicate",
+                layer_type="button",
+                confidence=0.9,
+                bbox={"x": 34, "y": 30, "width": 76, "height": 44},
+                mask=[[255] * 76 for _ in range(44)],
+            ),
+        ]
+    )
+    client = TestClient(create_app(settings, text_extractor=StubTextExtractor([]), visual_extractor=visual_extractor))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("visual.png", _visual_png_bytes(), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    manifest = client.get(f"/v1/jobs/{response.json()['job_id']}/manifest").json()
+    button_layers = [layer for layer in manifest["layers"] if layer["type"] == "button"]
+
+    assert len(button_layers) == 1
+    assert "possible_duplicate_layers" in manifest["warnings"]
+
+
+def test_create_job_warns_when_reconstruction_score_is_poor(tmp_path):
+    settings = Settings(storage_root=tmp_path / "artifacts")
+    visual_extractor = StubVisualExtractor(
+        [
+            VisualCandidate(
+                label="cta_button_wrong_region",
+                layer_type="button",
+                confidence=0.84,
+                bbox={"x": 90, "y": 10, "width": 40, "height": 20},
+                mask=[[255] * 40 for _ in range(20)],
+            )
+        ]
+    )
+    client = TestClient(create_app(settings, text_extractor=StubTextExtractor([]), visual_extractor=visual_extractor))
+
+    response = client.post(
+        "/v1/jobs",
+        files={"image": ("visual.png", _visual_png_bytes(), "image/png")},
+        data={"instruction": "Extract layers and prepare motion-ready assets"},
+    )
+
+    manifest = client.get(f"/v1/jobs/{response.json()['job_id']}/manifest").json()
+
+    assert manifest["reconstruction_score"] < 0.9
+    assert "reconstruction_mismatch" in manifest["warnings"]
+    assert manifest["status"] in {"completed_with_warnings", "completed_low_confidence"}

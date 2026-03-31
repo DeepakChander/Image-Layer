@@ -8,6 +8,7 @@ from PIL import Image, ImageChops, UnidentifiedImageError
 from layer_ai.contracts.examples import build_scene_graph
 from layer_ai.contracts.models import BoundingBox, EditableText, JobRecord, SceneManifest
 from layer_ai.errors import InvalidImageError
+from layer_ai.pipeline.phase4 import Phase4Pipeline
 from layer_ai.text.base import TextExtractor
 from layer_ai.text.models import TextCandidate
 from layer_ai.visual.base import VisualExtractor
@@ -15,12 +16,10 @@ from layer_ai.visual.models import VisualCandidate
 
 
 class LocalArtifactStore:
-    HIGH_CONFIDENCE_THRESHOLD = 0.9
-    LOW_CONFIDENCE_THRESHOLD = 0.6
-
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.phase4 = Phase4Pipeline()
 
     def next_job_id(self) -> str:
         existing = sorted(self.root.glob("job_*"))
@@ -98,61 +97,25 @@ class LocalArtifactStore:
         image.save(normalized_path)
 
         width, height = image.size
-        background_image = image.copy()
         reconstructed_path = preview_dir / "reconstructed.png"
         overlay_path = preview_dir / "overlay_debug.png"
-
-        layers: list[dict] = []
-        composited_layers: list[Image.Image] = []
 
         layer_name = "layer_001_background"
         cropped_path = cropped_dir / f"{layer_name}.png"
         full_canvas_path = full_canvas_dir / f"{layer_name}.png"
         mask_path = masks_dir / f"{layer_name}_mask.png"
-        layers.append(
-            {
-                "id": layer_name,
-                "name": f"{safe_name} background",
-                "type": "background",
-                "bbox": {"x": 0, "y": 0, "width": width, "height": height},
-                "z_index": 0,
-                "parent_id": None,
-                "cropped_asset": "layers/cropped/layer_001_background.png",
-                "full_canvas_asset": "layers/full_canvas/layer_001_background.png",
-                "mask_asset": "layers/masks/layer_001_background_mask.png",
-                "confidence": 1.0,
-                "warnings": [],
-                "text_content": None,
-                "text_confidence": None,
-                "editable_text": None,
-            }
-        )
+        text_layers: list[dict] = []
+        visual_layers: list[dict] = []
 
         text_candidates = text_extractor.extract(str(normalized_path), image.copy())
         for index, candidate in enumerate(text_candidates, start=1):
-            layer_index = len(layers) + 1
-            layer_name = f"layer_{layer_index:03d}_text_{index:03d}"
             bbox = self._clamp_bbox(candidate.bbox, image.size)
             if bbox.width <= 0 or bbox.height <= 0:
                 continue
 
             rgba_crop, alpha_mask = self._extract_text_rgba(image, bbox)
-            text_cropped_path = cropped_dir / f"{layer_name}.png"
-            text_full_canvas_path = full_canvas_dir / f"{layer_name}.png"
-            text_mask_path = masks_dir / f"{layer_name}_mask.png"
-            rgba_crop.save(text_cropped_path)
-
             full_canvas_image = Image.new("RGBA", image.size, color=(0, 0, 0, 0))
             full_canvas_image.paste(rgba_crop, (bbox.x, bbox.y), rgba_crop)
-            full_canvas_image.save(text_full_canvas_path)
-            alpha_mask.save(text_mask_path)
-            composited_layers.append(full_canvas_image)
-            background_patch = Image.new(
-                "RGBA",
-                rgba_crop.size,
-                color=(*self._estimate_background_color(rgba_crop), 255),
-            )
-            background_image.paste(background_patch, (bbox.x, bbox.y), alpha_mask)
 
             editable_text = None
             if candidate.confidence >= editable_text_confidence_threshold:
@@ -166,33 +129,25 @@ class LocalArtifactStore:
                     confidence=candidate.confidence,
                 )
 
-            layer_warnings: list[str] = []
-            if candidate.confidence < self.HIGH_CONFIDENCE_THRESHOLD:
-                layer_warnings.append("low_text_confidence")
-
-            layers.append(
+            text_layers.append(
                 {
-                    "id": layer_name,
                     "name": f"{candidate.text.lower()} text",
                     "type": "text",
                     "bbox": bbox.model_dump(mode="json"),
-                    "z_index": layer_index - 1,
-                    "parent_id": None,
-                    "cropped_asset": f"layers/cropped/{layer_name}.png",
-                    "full_canvas_asset": f"layers/full_canvas/{layer_name}.png",
-                    "mask_asset": f"layers/masks/{layer_name}_mask.png",
+                    "z_index": index,
                     "confidence": candidate.confidence,
-                    "warnings": layer_warnings,
+                    "warnings": [],
                     "text_content": candidate.text,
                     "text_confidence": candidate.confidence,
                     "editable_text": None if editable_text is None else editable_text.model_dump(mode="json"),
+                    "cropped_image": rgba_crop,
+                    "full_canvas_image": full_canvas_image,
+                    "mask_image": alpha_mask,
                 }
             )
 
-        visual_candidates = visual_extractor.extract(background_image.copy(), text_candidates)
+        visual_candidates = visual_extractor.extract(image.copy(), text_candidates)
         for index, candidate in enumerate(visual_candidates, start=1):
-            layer_index = len(layers) + 1
-            layer_name = f"layer_{layer_index:03d}_{candidate.layer_type}_{index:03d}"
             bbox = self._clamp_bbox(candidate.bbox, image.size)
             if bbox.width <= 0 or bbox.height <= 0:
                 continue
@@ -201,58 +156,62 @@ class LocalArtifactStore:
             if alpha_mask.getbbox() is None:
                 continue
 
-            visual_cropped_path = cropped_dir / f"{layer_name}.png"
-            visual_full_canvas_path = full_canvas_dir / f"{layer_name}.png"
-            visual_mask_path = masks_dir / f"{layer_name}_mask.png"
-            rgba_crop.save(visual_cropped_path)
-
             full_canvas_image = Image.new("RGBA", image.size, color=(0, 0, 0, 0))
             full_canvas_image.paste(rgba_crop, (bbox.x, bbox.y), rgba_crop)
-            full_canvas_image.save(visual_full_canvas_path)
-            alpha_mask.save(visual_mask_path)
-            composited_layers.append(full_canvas_image)
-
-            background_patch = Image.new(
-                "RGBA",
-                rgba_crop.size,
-                color=(*self._estimate_background_color(image.crop((bbox.x, bbox.y, bbox.x + bbox.width, bbox.y + bbox.height))), 255),
-            )
-            background_image.paste(background_patch, (bbox.x, bbox.y), alpha_mask)
-
-            layer_warnings = list(candidate.warnings)
-            if candidate.confidence < self.HIGH_CONFIDENCE_THRESHOLD and "low_visual_confidence" not in layer_warnings:
-                layer_warnings.append("low_visual_confidence")
-
-            layers.append(
+            visual_layers.append(
                 {
-                    "id": layer_name,
                     "name": candidate.label.replace("_", " "),
                     "type": candidate.layer_type,
                     "bbox": bbox.model_dump(mode="json"),
-                    "z_index": layer_index - 1,
-                    "parent_id": None,
-                    "cropped_asset": f"layers/cropped/{layer_name}.png",
-                    "full_canvas_asset": f"layers/full_canvas/{layer_name}.png",
-                    "mask_asset": f"layers/masks/{layer_name}_mask.png",
+                    "z_index": len(text_layers) + index,
                     "confidence": candidate.confidence,
-                    "warnings": layer_warnings,
+                    "warnings": list(candidate.warnings),
                     "text_content": None,
                     "text_confidence": None,
                     "editable_text": None,
+                    "cropped_image": rgba_crop,
+                    "full_canvas_image": full_canvas_image,
+                    "mask_image": alpha_mask,
                 }
             )
 
+        phase4 = self.phase4.run(image, text_layers=text_layers, visual_layers=visual_layers)
+        background_image = phase4.background_image
+        fused_layers = self._finalize_layer_metadata(phase4.layers)
         background_image.save(cropped_path)
         background_image.save(full_canvas_path)
         Image.new("L", image.size, color=255).save(mask_path)
-        reconstructed_image = background_image.copy()
-        for layer_image in composited_layers:
-            reconstructed_image.alpha_composite(layer_image)
+        for layer in fused_layers:
+            layer["cropped_image"].save(cropped_dir / Path(layer["cropped_asset"]).name)
+            layer["full_canvas_image"].save(full_canvas_dir / Path(layer["full_canvas_asset"]).name)
+            layer["mask_image"].save(masks_dir / Path(layer["mask_asset"]).name)
+
+        reconstructed_image = phase4.reconstructed_image
         reconstructed_image.save(reconstructed_path)
         self._build_overlay_debug(image, overlay_path, text_candidates, visual_candidates)
-        global_confidence = self._compute_global_confidence(layers)
-        warnings = self._collect_manifest_warnings(layers)
-        status = self._determine_status(global_confidence, warnings)
+        status = phase4.quality.status
+        global_confidence = phase4.quality.global_confidence
+        warnings = phase4.quality.warnings
+        reconstruction_score = phase4.preview_score.reconstruction_score
+        preview_diff_ratio = phase4.preview_score.preview_diff_ratio
+
+        background_layer = {
+            "id": layer_name,
+            "name": f"{safe_name} background",
+            "type": "background",
+            "bbox": {"x": 0, "y": 0, "width": width, "height": height},
+            "z_index": 0,
+            "parent_id": None,
+            "cropped_asset": "layers/cropped/layer_001_background.png",
+            "full_canvas_asset": "layers/full_canvas/layer_001_background.png",
+            "mask_asset": "layers/masks/layer_001_background_mask.png",
+            "confidence": 1.0,
+            "warnings": [],
+            "text_content": None,
+            "text_confidence": None,
+            "editable_text": None,
+        }
+        manifest_layers = [background_layer, *self._strip_runtime_fields(fused_layers)]
 
         manifest = SceneManifest.model_validate(
             {
@@ -262,9 +221,11 @@ class LocalArtifactStore:
                 "route": "design_route",
                 "status": status,
                 "global_confidence": global_confidence,
+                "reconstruction_score": reconstruction_score,
+                "preview_diff_ratio": preview_diff_ratio,
                 "warnings": warnings,
                 "canvas": {"width": width, "height": height},
-                "layers": layers,
+                "layers": manifest_layers,
             }
         )
 
@@ -274,7 +235,7 @@ class LocalArtifactStore:
         confidence_path = logs_dir / "confidence_report.json"
 
         manifest_path.write_text(json.dumps(manifest.model_dump(mode="json"), indent=2), encoding="utf-8")
-        scene_graph = build_scene_graph(job_id=job_id, layers=layers)
+        scene_graph = build_scene_graph(job_id=job_id, layers=manifest_layers)
         scene_graph_path.write_text(json.dumps(scene_graph, indent=2), encoding="utf-8")
         report_path.write_text(
             json.dumps(
@@ -283,6 +244,7 @@ class LocalArtifactStore:
                     "status": status,
                     "route": "design_route",
                     "warnings": warnings,
+                    "reconstruction_score": reconstruction_score,
                 },
                 indent=2,
             ),
@@ -293,7 +255,11 @@ class LocalArtifactStore:
                 {
                     "job_id": job_id,
                     "global_confidence": global_confidence,
-                    "layers": [{"id": layer["id"], "confidence": layer["confidence"]} for layer in layers],
+                    "reconstruction_score": reconstruction_score,
+                    "preview_diff_ratio": preview_diff_ratio,
+                    "changed_pixels": phase4.preview_score.changed_pixels,
+                    "layers": [{"id": layer["id"], "confidence": layer["confidence"]} for layer in manifest_layers],
+                    "warnings": warnings,
                 },
                 indent=2,
             ),
@@ -311,6 +277,34 @@ class LocalArtifactStore:
                 archive.write(file_path, arcname=file_path.relative_to(job_root).as_posix())
 
         return manifest, manifest_path, archive_path
+
+    @staticmethod
+    def _finalize_layer_metadata(layers: list[dict]) -> list[dict]:
+        type_counters: dict[str, int] = {}
+        finalized: list[dict] = []
+        for index, layer in enumerate(layers, start=2):
+            layer_type = layer["type"]
+            type_counters[layer_type] = type_counters.get(layer_type, 0) + 1
+            layer_id = f"layer_{index:03d}_{layer_type}_{type_counters[layer_type]:03d}"
+            finalized_layer = {
+                **layer,
+                "id": layer_id,
+                "z_index": index - 1,
+                "parent_id": None,
+                "cropped_asset": f"layers/cropped/{layer_id}.png",
+                "full_canvas_asset": f"layers/full_canvas/{layer_id}.png",
+                "mask_asset": f"layers/masks/{layer_id}_mask.png",
+            }
+            finalized.append(finalized_layer)
+        return finalized
+
+    @staticmethod
+    def _strip_runtime_fields(layers: list[dict]) -> list[dict]:
+        runtime_keys = {"cropped_image", "full_canvas_image", "mask_image"}
+        stripped_layers: list[dict] = []
+        for layer in layers:
+            stripped_layers.append({key: value for key, value in layer.items() if key not in runtime_keys})
+        return stripped_layers
 
     @staticmethod
     def _clamp_bbox(bbox: BoundingBox, image_size: tuple[int, int]) -> BoundingBox:
@@ -413,27 +407,3 @@ class LocalArtifactStore:
                 width=1,
             )
         overlay.save(overlay_path)
-
-    @classmethod
-    def _compute_global_confidence(cls, layers: list[dict]) -> float:
-        non_background_layers = [layer for layer in layers if layer["type"] != "background"]
-        if not non_background_layers:
-            return 1.0
-        return min(float(layer["confidence"]) for layer in non_background_layers)
-
-    @staticmethod
-    def _collect_manifest_warnings(layers: list[dict]) -> list[str]:
-        warnings: list[str] = []
-        for layer in layers:
-            for warning in layer.get("warnings", []):
-                if warning not in warnings:
-                    warnings.append(warning)
-        return warnings
-
-    @classmethod
-    def _determine_status(cls, global_confidence: float, warnings: list[str]) -> str:
-        if global_confidence < cls.LOW_CONFIDENCE_THRESHOLD:
-            return "completed_low_confidence"
-        if warnings:
-            return "completed_with_warnings"
-        return "completed_high_confidence"
