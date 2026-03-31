@@ -4,8 +4,8 @@ from pathlib import Path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 
-from layer_ai.errors import InvalidImageError
-from layer_ai.renderers import RendererNotImplementedError, get_renderer_adapter
+from layer_ai.errors import InvalidImageError, RendererJobNotReadyError
+from layer_ai.renderers import RendererNotImplementedError, UnsupportedRendererError
 
 logger = logging.getLogger(__name__)
 
@@ -97,14 +97,19 @@ def register_routes(app: FastAPI) -> None:
     def render_remotion(job_id: str) -> dict:
         return _render_job(app, job_id, "remotion")
 
+    @app.post("/v1/jobs/{job_id}/render/{renderer_name}")
+    def render_job(job_id: str, renderer_name: str) -> dict:
+        return _render_job(app, job_id, renderer_name)
+
 
 def _render_job(app: FastAPI, job_id: str, renderer_name: str) -> dict:
-    manifest = app.state.job_service.get_manifest(job_id)
-    if manifest is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-
-    adapter = get_renderer_adapter(renderer_name)
     try:
-        return adapter.handoff(job_id, manifest)
+        return app.state.job_service.create_renderer_handoff(job_id, renderer_name)
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error)) from error
+    except RendererJobNotReadyError as error:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(error)) from error
+    except UnsupportedRendererError as error:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
     except RendererNotImplementedError as error:
         raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=str(error)) from error

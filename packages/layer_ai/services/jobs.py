@@ -2,13 +2,20 @@ from datetime import UTC, datetime
 
 from layer_ai.config import Settings
 from layer_ai.contracts.models import JobRecord, JobStatus
-from layer_ai.errors import InvalidImageError
+from layer_ai.errors import InvalidImageError, RendererJobNotReadyError
+from layer_ai.renderers import get_renderer_adapter
 from layer_ai.storage.local import LocalArtifactStore
 from layer_ai.text.base import TextExtractor
 from layer_ai.visual.base import VisualExtractor
 
 
 class JobService:
+    COMPLETED_STATUSES = {
+        JobStatus.COMPLETED_HIGH_CONFIDENCE,
+        JobStatus.COMPLETED_WITH_WARNINGS,
+        JobStatus.COMPLETED_LOW_CONFIDENCE,
+    }
+
     def __init__(
         self,
         settings: Settings,
@@ -75,3 +82,21 @@ class JobService:
         if record is None:
             return None
         return record.artifact_zip_path
+
+    def get_job_root(self, job_id: str):
+        return self.store.job_root(job_id)
+
+    def create_renderer_handoff(self, job_id: str, renderer_name: str) -> dict:
+        record = self.get_job(job_id)
+        if record is None:
+            raise FileNotFoundError("Job not found")
+        if record.status not in self.COMPLETED_STATUSES:
+            raise RendererJobNotReadyError("Job is not ready for renderer handoff")
+
+        manifest = self.get_manifest(job_id)
+        if manifest is None:
+            raise FileNotFoundError("Job manifest not found")
+
+        adapter = get_renderer_adapter(renderer_name)
+        result = adapter.handoff(job_id=job_id, job_root=self.get_job_root(job_id), manifest=manifest)
+        return result.model_dump(mode="json")
