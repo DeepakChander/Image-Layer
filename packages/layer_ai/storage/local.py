@@ -9,6 +9,7 @@ from layer_ai.contracts.examples import build_scene_graph
 from layer_ai.contracts.models import BoundingBox, EditableText, JobRecord, SceneManifest
 from layer_ai.errors import InvalidImageError
 from layer_ai.pipeline.phase4 import Phase4Pipeline
+from layer_ai.renderers.models import RendererHandoff
 from layer_ai.text.base import TextExtractor
 from layer_ai.text.models import TextCandidate
 from layer_ai.visual.base import VisualExtractor
@@ -55,6 +56,20 @@ class LocalArtifactStore:
 
     def job_root(self, job_id: str) -> Path:
         return self.root / job_id
+
+    @staticmethod
+    def resolve_job_asset_path(job_root: Path, asset_path: str) -> str:
+        return str((job_root / asset_path).resolve())
+
+    @staticmethod
+    def renderer_handoff_path(job_root: Path, renderer_name: str) -> Path:
+        output_dir = job_root / "renderers" / renderer_name
+        output_dir.mkdir(parents=True, exist_ok=True)
+        return output_dir / "renderer_handoff.json"
+
+    @staticmethod
+    def write_renderer_handoff(path: Path, handoff: RendererHandoff) -> None:
+        path.write_text(handoff.model_dump_json(indent=2), encoding="utf-8")
 
     def build_package(
         self,
