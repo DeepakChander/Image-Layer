@@ -8,6 +8,10 @@ class RendererNotImplementedError(NotImplementedError):
     """Raised when a renderer contract exists but no adapter is implemented yet."""
 
 
+class UnsupportedRendererError(ValueError):
+    """Raised when a renderer name is not registered."""
+
+
 class RendererAdapter(Protocol):
     name: str
 

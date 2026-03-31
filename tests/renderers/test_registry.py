@@ -1,4 +1,10 @@
+import pytest
+
+from layer_ai.renderers.after_effects import AfterEffectsRendererAdapter
+from layer_ai.renderers.base import UnsupportedRendererError
 from layer_ai.renderers.models import RendererHandoff, RendererHandoffResult
+from layer_ai.renderers.registry import get_renderer_adapter
+from layer_ai.renderers.remotion import RemotionRendererAdapter
 
 
 def test_renderer_handoff_models_capture_job_and_layer_metadata():
@@ -68,3 +74,13 @@ def test_renderer_handoff_models_capture_job_and_layer_metadata():
     assert [layer.id for layer in handoff.layers] == ["layer_001_background", "layer_002_text_001"]
     assert handoff.layers[1].editable_text.text == "HELLO"
     assert result.handoff_path == "renderers/after-effects/renderer_handoff.json"
+
+
+def test_registry_returns_real_renderer_adapters():
+    assert isinstance(get_renderer_adapter("after-effects"), AfterEffectsRendererAdapter)
+    assert isinstance(get_renderer_adapter("remotion"), RemotionRendererAdapter)
+
+
+def test_registry_rejects_unknown_renderer_names():
+    with pytest.raises(UnsupportedRendererError):
+        get_renderer_adapter("not-a-renderer")
